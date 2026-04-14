@@ -26,8 +26,6 @@ interface IAMPolicy {
 
 const SOURCE = 'AWS IAM Policy Validator';
 const VALID_VERSIONS = ['2012-10-17', '2008-10-17'];
-const POLICY_KEY_ORDER = ['Version', 'Id', 'Statement'];
-const STATEMENT_KEY_ORDER = ['Sid', 'Effect', 'Principal', 'NotPrincipal', 'Action', 'NotAction', 'Resource', 'NotResource', 'Condition'];
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration('awsIamPolicyValidator');
@@ -59,9 +57,8 @@ export function activate(context: vscode.ExtensionContext) {
       const text = editor.document.getText();
 
       // Parse first — give a clear message if JSON itself is broken
-      let parsed: unknown;
       try {
-        parsed = JSON.parse(text);
+        JSON.parse(text);
       } catch (err) {
         const hint = /'\s*\w/.test(text.slice(0, 300))
           ? 'File uses single quotes — JSON requires double quotes for all keys and values.'
@@ -69,20 +66,6 @@ export function activate(context: vscode.ExtensionContext) {
         vscode.window.showErrorMessage(`AWS IAM: Cannot parse JSON — ${hint}`);
         validateDocument(editor.document);
         return;
-      }
-
-      // Auto-format: arrange keys into canonical IAM order and fix indentation
-      if (isIAMPolicy(parsed)) {
-        const arranged = arrangePolicy(parsed as IAMPolicy);
-        const formatted = JSON.stringify(arranged, null, 4);
-        if (formatted !== text.trim()) {
-          await editor.edit(editBuilder => {
-            editBuilder.replace(
-              new vscode.Range(editor.document.positionAt(0), editor.document.positionAt(text.length)),
-              formatted
-            );
-          });
-        }
       }
 
       validateDocument(editor.document);
@@ -352,7 +335,7 @@ function checkLimits(doc: vscode.TextDocument, charCount: number): vscode.Diagno
       fullRange,
       `Policy exceeds the inline policy size limit (${fmt(charCount)} / ${fmt(inlineLimit)} characters). ` +
       `This policy must be used as a managed policy — it is too large to attach inline.`,
-      vscode.DiagnosticSeverity.Information
+      vscode.DiagnosticSeverity.Hint
     ));
   }
 
@@ -361,31 +344,6 @@ function checkLimits(doc: vscode.TextDocument, charCount: number): vscode.Diagno
 
 // ─── Arrange (canonical key order) ───────────────────────────────────────────
 
-function arrangePolicy(policy: IAMPolicy): IAMPolicy {
-  const out: IAMPolicy = {};
-  for (const key of POLICY_KEY_ORDER) {
-    if (key in policy) {
-      out[key] = key === 'Statement' && Array.isArray(policy.Statement)
-        ? (policy.Statement as IAMStatement[]).map(arrangeStatement)
-        : policy[key];
-    }
-  }
-  for (const key of Object.keys(policy)) {
-    if (!(key in out)) out[key] = policy[key];
-  }
-  return out;
-}
-
-function arrangeStatement(stmt: IAMStatement): IAMStatement {
-  const out: IAMStatement = {};
-  for (const key of STATEMENT_KEY_ORDER) {
-    if (key in stmt) out[key] = stmt[key];
-  }
-  for (const key of Object.keys(stmt)) {
-    if (!(key in out)) out[key] = stmt[key];
-  }
-  return out;
-}
 
 // ─── IAM detection ────────────────────────────────────────────────────────────
 

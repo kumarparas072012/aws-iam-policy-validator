@@ -2,7 +2,7 @@
   "name": "aws-iam-policy-validator",
   "displayName": "AWS IAM Policy Validator",
   "description": "Validates AWS IAM policy files: checks for malformed JSON, structural issues, and character limits (managed 6,144 / inline 2,048)",
-  "version": "0.1.3",
+  "version": "0.1.4",
   "publisher": "ParasBhangalia",
   "icon": "icon.png",
   "repository": {
