@@ -27,7 +27,7 @@ Open the Command Palette (`Cmd+Shift+P` / `Ctrl+Shift+P`) and search for:
 
 ### Keyboard shortcut
 
-`Cmd+Shift+Alt+I` (Mac) / `Ctrl+Shift+Alt+I` (Windows/Linux) — validates the current file instantly.
+`Cmd+Alt+P` (Mac) / `Ctrl+Alt+P` (Windows/Linux) — validates the current file instantly.
 
 ### Status bar
 

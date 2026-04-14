@@ -28,8 +28,8 @@
     "keybindings": [
       {
         "command": "aws-iam-policy-validator.validate",
-        "key": "ctrl+shift+alt+i",
-        "mac": "cmd+shift+alt+i",
+        "key": "ctrl+alt+p",
+        "mac": "cmd+alt+p",
         "when": "editorLangId == json"
       }
     ],
