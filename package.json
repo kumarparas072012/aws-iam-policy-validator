@@ -4,6 +4,15 @@
   "description": "Validates AWS IAM policy files: checks for malformed JSON, structural issues, and character limits (managed 6,144 / inline 2,048)",
   "version": "0.1.0",
   "publisher": "ParasBhangalia",
+  "icon": "icon.png",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/parasbhangalia/aws-iam-policy-validator"
+  },
+  "homepage": "https://github.com/parasbhangalia/aws-iam-policy-validator#readme",
+  "bugs": {
+    "url": "https://github.com/parasbhangalia/aws-iam-policy-validator/issues"
+  },
   "engines": {
     "vscode": "^1.74.0"
   },

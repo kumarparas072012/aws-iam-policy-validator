@@ -83,3 +83,27 @@ Change these in **Settings** (`Cmd+,`) → search `AWS IAM`.
   ]
 }
 ```
+
+## Publishing to the VS Code Marketplace
+
+### 1. Bump the version
+
+Update `"version"` in `package.json` (e.g. `0.1.0` → `0.1.1`).
+
+### 2. Build the package
+
+```bash
+npm run package
+```
+
+This compiles the extension and produces `aws-iam-policy-validator-<version>.vsix` in the project root.
+
+### 3. Upload to the Marketplace
+
+1. Go to [https://marketplace.visualstudio.com/manage](https://marketplace.visualstudio.com/manage)
+2. Sign in with your Microsoft account
+3. Click publisher **ParasBhangalia**
+4. Click **New extension** → **Visual Studio Code**
+5. Drag and drop the `.vsix` file onto the upload area and click **Upload**
+
+The extension will be live on the Marketplace within a few minutes.
