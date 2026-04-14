@@ -12,18 +12,22 @@ interface IAMStatement {
   Principal?: unknown;
   NotPrincipal?: unknown;
   Condition?: unknown;
+  [key: string]: unknown;
 }
 
 interface IAMPolicy {
   Version?: string;
   Id?: string;
-  Statement?: IAMStatement[];
+  Statement?: unknown;
+  [key: string]: unknown;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const SOURCE = 'AWS IAM Policy Validator';
 const VALID_VERSIONS = ['2012-10-17', '2008-10-17'];
+const POLICY_KEY_ORDER = ['Version', 'Id', 'Statement'];
+const STATEMENT_KEY_ORDER = ['Sid', 'Effect', 'Principal', 'NotPrincipal', 'Action', 'NotAction', 'Resource', 'NotResource', 'Condition'];
 
 function getConfig() {
   const cfg = vscode.workspace.getConfiguration('awsIamPolicyValidator');
@@ -47,22 +51,56 @@ export function activate(context: vscode.ExtensionContext) {
   statusBarItem.command = 'aws-iam-policy-validator.validate';
   context.subscriptions.push(statusBarItem);
 
-  // Commands
   context.subscriptions.push(
-    vscode.commands.registerCommand('aws-iam-policy-validator.validate', () => {
+    vscode.commands.registerCommand('aws-iam-policy-validator.validate', async () => {
       const editor = vscode.window.activeTextEditor;
-      if (editor) {
+      if (!editor) return;
+
+      const text = editor.document.getText();
+
+      // Parse first — give a clear message if JSON itself is broken
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(text);
+      } catch (err) {
+        const hint = /'\s*\w/.test(text.slice(0, 300))
+          ? 'File uses single quotes — JSON requires double quotes for all keys and values.'
+          : (err as Error).message;
+        vscode.window.showErrorMessage(`AWS IAM: Cannot parse JSON — ${hint}`);
         validateDocument(editor.document);
-        const diags = diagnosticCollection.get(editor.document.uri) ?? [];
-        const errors = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
-        const warnings = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
-        if (errors === 0 && warnings === 0) {
-          vscode.window.showInformationMessage('AWS IAM Policy: No issues found.');
-        } else {
-          vscode.window.showWarningMessage(
-            `AWS IAM Policy: ${errors} error(s), ${warnings} warning(s). See Problems panel.`
-          );
+        return;
+      }
+
+      // Auto-format: arrange keys into canonical IAM order and fix indentation
+      if (isIAMPolicy(parsed)) {
+        const arranged = arrangePolicy(parsed as IAMPolicy);
+        const formatted = JSON.stringify(arranged, null, 4);
+        if (formatted !== text.trim()) {
+          await editor.edit(editBuilder => {
+            editBuilder.replace(
+              new vscode.Range(editor.document.positionAt(0), editor.document.positionAt(text.length)),
+              formatted
+            );
+          });
         }
+      }
+
+      validateDocument(editor.document);
+
+      const diags = diagnosticCollection.get(editor.document.uri) ?? [];
+      const errors = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
+      const warnings = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Warning).length;
+
+      if (errors === 0 && warnings === 0) {
+        vscode.window.showInformationMessage('$(pass-filled) AWS IAM Policy is valid.');
+      } else {
+        const parts = [
+          errors > 0 ? `${errors} error(s)` : '',
+          warnings > 0 ? `${warnings} warning(s)` : '',
+        ].filter(Boolean).join(', ');
+        vscode.window.showWarningMessage(
+          `AWS IAM Policy has ${parts}. Open Problems panel (Cmd+Shift+M) to see what to fix.`
+        );
       }
     })
   );
@@ -82,23 +120,17 @@ export function activate(context: vscode.ExtensionContext) {
     })
   );
 
-  // Event listeners
+  // Auto-validate on open / change / close
   context.subscriptions.push(
     vscode.workspace.onDidOpenTextDocument(validateDocument),
     vscode.workspace.onDidChangeTextDocument(e => validateDocument(e.document)),
-    vscode.workspace.onDidCloseTextDocument(doc => {
-      diagnosticCollection.delete(doc.uri);
-    }),
+    vscode.workspace.onDidCloseTextDocument(doc => diagnosticCollection.delete(doc.uri)),
     vscode.window.onDidChangeActiveTextEditor(editor => {
-      if (editor) {
-        refreshStatusBar(editor.document);
-      } else {
-        statusBarItem.hide();
-      }
+      if (editor) refreshStatusBar(editor.document);
+      else statusBarItem.hide();
     })
   );
 
-  // Validate already-open documents
   vscode.workspace.textDocuments.forEach(validateDocument);
   if (vscode.window.activeTextEditor) {
     refreshStatusBar(vscode.window.activeTextEditor.document);
@@ -110,11 +142,8 @@ export function deactivate() {
   statusBarItem.dispose();
 }
 
-// ─── Main validator ───────────────────────────────────────────────────────────
+// ─── Validation pipeline ──────────────────────────────────────────────────────
 
-/**
- * Validates a document. Returns true if it was recognised as an IAM policy.
- */
 function validateDocument(document: vscode.TextDocument): boolean {
   if (document.languageId !== 'json' && !document.fileName.endsWith('.json')) {
     return false;
@@ -123,19 +152,22 @@ function validateDocument(document: vscode.TextDocument): boolean {
   const text = document.getText();
   const diagnostics: vscode.Diagnostic[] = [];
 
-  // ── 1. JSON parse ──────────────────────────────────────────────────────────
+  // 1. Parse JSON
   let parsed: unknown;
   try {
     parsed = JSON.parse(text);
   } catch (err) {
-    const range = jsonErrorRange(document, err as SyntaxError);
-    diagnostics.push(makeDiag(range, `Invalid JSON: ${(err as Error).message}`, vscode.DiagnosticSeverity.Error));
+    const hasSingleQuotes = /'\s*\w/.test(text.slice(0, 300));
+    const msg = hasSingleQuotes
+      ? 'Invalid JSON: file uses single quotes (\') instead of double quotes ("). JSON requires double quotes for all keys and values.'
+      : `Invalid JSON: ${(err as Error).message}`;
+    diagnostics.push(makeDiag(jsonErrorRange(document, err as SyntaxError), msg, vscode.DiagnosticSeverity.Error));
     diagnosticCollection.set(document.uri, diagnostics);
     refreshStatusBar(document, diagnostics, -1);
-    return true; // treat any JSON file with a parse error as worth reporting
+    return true;
   }
 
-  // ── 2. IAM policy detection ────────────────────────────────────────────────
+  // 2. Detect IAM policy
   if (!isIAMPolicy(parsed)) {
     diagnosticCollection.set(document.uri, []);
     if (vscode.window.activeTextEditor?.document.uri.toString() === document.uri.toString()) {
@@ -144,33 +176,22 @@ function validateDocument(document: vscode.TextDocument): boolean {
     return false;
   }
 
-  const policy = parsed as IAMPolicy;
+  // 3. Structural validation
+  diagnostics.push(...validateStructure(document, parsed as IAMPolicy));
 
-  // ── 3. Structure validation ────────────────────────────────────────────────
-  diagnostics.push(...validateStructure(document, policy));
-
-  // ── 4. Character limit check ───────────────────────────────────────────────
+  // 4. Size check (only when structurally valid)
+  const hasErrors = diagnostics.some(d => d.severity === vscode.DiagnosticSeverity.Error);
   const minifiedLen = JSON.stringify(parsed).length;
-  diagnostics.push(...checkLimits(document, minifiedLen));
+  if (!hasErrors) {
+    diagnostics.push(...checkLimits(document, minifiedLen));
+  }
 
   diagnosticCollection.set(document.uri, diagnostics);
   refreshStatusBar(document, diagnostics, minifiedLen);
   return true;
 }
 
-// ─── IAM detection ────────────────────────────────────────────────────────────
-
-function isIAMPolicy(obj: unknown): boolean {
-  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return false;
-  const o = obj as Record<string, unknown>;
-  // Must look like an IAM policy: has Statement (array or any) or a known Version
-  return (
-    o.Statement !== undefined ||
-    (typeof o.Version === 'string' && VALID_VERSIONS.includes(o.Version))
-  );
-}
-
-// ─── Structure validation ─────────────────────────────────────────────────────
+// ─── Structural validation ────────────────────────────────────────────────────
 
 function validateStructure(doc: vscode.TextDocument, policy: IAMPolicy): vscode.Diagnostic[] {
   const diags: vscode.Diagnostic[] = [];
@@ -179,22 +200,22 @@ function validateStructure(doc: vscode.TextDocument, policy: IAMPolicy): vscode.
   if (policy.Version === undefined) {
     diags.push(makeDiag(
       new vscode.Range(0, 0, 0, 1),
-      'Missing recommended "Version" field. AWS recommends "2012-10-17".',
+      'Missing "Version" field. Add "Version": "2012-10-17" as the first field in your policy.',
       vscode.DiagnosticSeverity.Warning
     ));
   } else if (!VALID_VERSIONS.includes(policy.Version)) {
     diags.push(makeDiag(
       findKeyRange(doc, 'Version'),
-      `Unknown policy version "${policy.Version}". Valid values: ${VALID_VERSIONS.map(v => `"${v}"`).join(', ')}.`,
+      `Invalid version "${policy.Version}". Use "2012-10-17" (recommended) or "2008-10-17".`,
       vscode.DiagnosticSeverity.Error
     ));
   }
 
-  // Statement presence
+  // Statement
   if (policy.Statement === undefined) {
     diags.push(makeDiag(
       new vscode.Range(0, 0, 0, 1),
-      'Missing required "Statement" field.',
+      'Missing required "Statement" field. Add a "Statement" array containing at least one statement object.',
       vscode.DiagnosticSeverity.Error
     ));
     return diags;
@@ -203,7 +224,7 @@ function validateStructure(doc: vscode.TextDocument, policy: IAMPolicy): vscode.
   if (!Array.isArray(policy.Statement)) {
     diags.push(makeDiag(
       findKeyRange(doc, 'Statement'),
-      '"Statement" must be an array.',
+      '"Statement" must be an array ([ ]). Wrap your statement object in square brackets.',
       vscode.DiagnosticSeverity.Error
     ));
     return diags;
@@ -212,14 +233,13 @@ function validateStructure(doc: vscode.TextDocument, policy: IAMPolicy): vscode.
   if (policy.Statement.length === 0) {
     diags.push(makeDiag(
       findKeyRange(doc, 'Statement'),
-      '"Statement" array is empty — no permissions are granted or denied.',
+      '"Statement" array is empty. Add at least one statement with Effect, Action, and Resource.',
       vscode.DiagnosticSeverity.Warning
     ));
     return diags;
   }
 
-  // Individual statements
-  policy.Statement.forEach((stmt, idx) => {
+  (policy.Statement as IAMStatement[]).forEach((stmt, idx) => {
     diags.push(...validateStatement(doc, stmt, idx));
   });
 
@@ -228,22 +248,25 @@ function validateStructure(doc: vscode.TextDocument, policy: IAMPolicy): vscode.
 
 function validateStatement(doc: vscode.TextDocument, stmt: IAMStatement, idx: number): vscode.Diagnostic[] {
   const diags: vscode.Diagnostic[] = [];
-  const label = stmt.Sid ? `Statement "${stmt.Sid}"` : `Statement[${idx}]`;
-  // Best-effort: try to locate the Sid or fall back to line 0
-  const stmtRange = stmt.Sid ? findKeyRange(doc, stmt.Sid) : new vscode.Range(0, 0, 0, 1);
+  const label = stmt.Sid ? `Statement "${stmt.Sid}"` : `Statement[${idx + 1}]`;
+  const range = stmt.Sid ? findKeyRange(doc, stmt.Sid) : new vscode.Range(0, 0, 0, 1);
 
   if (typeof stmt !== 'object' || stmt === null) {
-    diags.push(makeDiag(stmtRange, `${label}: must be an object.`, vscode.DiagnosticSeverity.Error));
+    diags.push(makeDiag(range, `${label}: each statement must be a JSON object { }.`, vscode.DiagnosticSeverity.Error));
     return diags;
   }
 
   // Effect
   if (!stmt.Effect) {
-    diags.push(makeDiag(stmtRange, `${label}: missing required "Effect" field.`, vscode.DiagnosticSeverity.Error));
+    diags.push(makeDiag(
+      range,
+      `${label}: missing required "Effect" field. Add "Effect": "Allow" or "Effect": "Deny".`,
+      vscode.DiagnosticSeverity.Error
+    ));
   } else if (!['Allow', 'Deny'].includes(stmt.Effect)) {
     diags.push(makeDiag(
-      stmtRange,
-      `${label}: "Effect" must be "Allow" or "Deny", got "${stmt.Effect}".`,
+      findKeyRange(doc, stmt.Effect),
+      `${label}: "Effect" is "${stmt.Effect}" but must be exactly "Allow" or "Deny" (case-sensitive).`,
       vscode.DiagnosticSeverity.Error
     ));
   }
@@ -251,19 +274,28 @@ function validateStatement(doc: vscode.TextDocument, stmt: IAMStatement, idx: nu
   // Action / NotAction
   const hasAction = stmt.Action !== undefined;
   const hasNotAction = stmt.NotAction !== undefined;
+
   if (!hasAction && !hasNotAction) {
-    diags.push(makeDiag(stmtRange, `${label}: missing required "Action" or "NotAction".`, vscode.DiagnosticSeverity.Error));
+    diags.push(makeDiag(
+      range,
+      `${label}: missing required "Action" field. Add "Action": "*" to allow all actions, or specify actions like "Action": ["s3:GetObject", "s3:PutObject"].`,
+      vscode.DiagnosticSeverity.Error
+    ));
   } else if (hasAction && hasNotAction) {
-    diags.push(makeDiag(stmtRange, `${label}: cannot have both "Action" and "NotAction".`, vscode.DiagnosticSeverity.Error));
+    diags.push(makeDiag(
+      range,
+      `${label}: cannot have both "Action" and "NotAction" in the same statement. Remove one of them.`,
+      vscode.DiagnosticSeverity.Error
+    ));
   } else if (hasAction) {
-    const actions = ([] as string[]).concat(stmt.Action as string | string[]);
+    const actions = ([] as unknown[]).concat(stmt.Action);
     actions.forEach(a => {
       if (typeof a !== 'string') {
-        diags.push(makeDiag(stmtRange, `${label}: Action values must be strings.`, vscode.DiagnosticSeverity.Error));
-      } else if (a !== '*' && !/^[\w*]+:[\w*]+$/.test(a)) {
+        diags.push(makeDiag(range, `${label}: each action must be a string (e.g. "s3:GetObject" or "*").`, vscode.DiagnosticSeverity.Error));
+      } else if (a !== '*' && !/^[\w-]+:[\w*]+$/.test(a)) {
         diags.push(makeDiag(
-          stmtRange,
-          `${label}: Action "${a}" looks malformed — expected format "service:Action" or "*".`,
+          range,
+          `${label}: action "${a}" is malformed. Use the format "service:Action" (e.g. "s3:GetObject", "lambda:Invoke*") or "*" for all actions.`,
           vscode.DiagnosticSeverity.Warning
         ));
       }
@@ -277,48 +309,49 @@ function validateStatement(doc: vscode.TextDocument, stmt: IAMStatement, idx: nu
 
   if (!hasResource && !hasNotResource && !hasPrincipal) {
     diags.push(makeDiag(
-      stmtRange,
-      `${label}: missing "Resource" or "NotResource" field.`,
+      range,
+      `${label}: missing required "Resource" field. Add "Resource": "*" for all resources, or specify an ARN like "Resource": "arn:aws:s3:::my-bucket/*".`,
       vscode.DiagnosticSeverity.Error
     ));
   } else if (hasResource && hasNotResource) {
-    diags.push(makeDiag(stmtRange, `${label}: cannot have both "Resource" and "NotResource".`, vscode.DiagnosticSeverity.Error));
+    diags.push(makeDiag(
+      range,
+      `${label}: cannot have both "Resource" and "NotResource" in the same statement. Remove one of them.`,
+      vscode.DiagnosticSeverity.Error
+    ));
   }
 
   return diags;
 }
 
-// ─── Character limit check ────────────────────────────────────────────────────
+// ─── Size check ───────────────────────────────────────────────────────────────
 
 function checkLimits(doc: vscode.TextDocument, charCount: number): vscode.Diagnostic[] {
   const diags: vscode.Diagnostic[] = [];
   const { managedLimit, inlineLimit, warnPercent } = getConfig();
   const fullRange = new vscode.Range(0, 0, doc.lineCount - 1, 0);
 
-  // Managed policy limit
   if (charCount > managedLimit) {
     diags.push(makeDiag(
       fullRange,
-      `Exceeds AWS managed policy size limit: ${fmt(charCount)} / ${fmt(managedLimit)} chars (minified). ` +
-      `${fmt(charCount - managedLimit)} chars over — consider splitting into multiple policies.`,
+      `Policy exceeds the AWS managed policy size limit: ${fmt(charCount)} / ${fmt(managedLimit)} characters (minified). ` +
+      `${fmt(charCount - managedLimit)} characters over limit — split into multiple policies to fix.`,
       vscode.DiagnosticSeverity.Error
     ));
   } else if (charCount > managedLimit * warnPercent) {
-    const remaining = managedLimit - charCount;
     diags.push(makeDiag(
       fullRange,
-      `Approaching AWS managed policy limit: ${fmt(charCount)} / ${fmt(managedLimit)} chars (${pct(charCount, managedLimit)}%). ` +
-      `Only ${fmt(remaining)} chars remaining.`,
+      `Policy is approaching the AWS managed policy size limit: ${fmt(charCount)} / ${fmt(managedLimit)} characters (${pct(charCount, managedLimit)}% used). ` +
+      `Only ${fmt(managedLimit - charCount)} characters remaining.`,
       vscode.DiagnosticSeverity.Warning
     ));
   }
 
-  // Inline policy limit (informational when over, unless already an error)
   if (charCount > inlineLimit && charCount <= managedLimit) {
     diags.push(makeDiag(
       fullRange,
-      `Policy exceeds inline policy size limit (${fmt(charCount)} / ${fmt(inlineLimit)} chars minified). ` +
-      `This policy can only be used as a managed policy, not an inline policy.`,
+      `Policy exceeds the inline policy size limit (${fmt(charCount)} / ${fmt(inlineLimit)} characters). ` +
+      `This policy must be used as a managed policy — it is too large to attach inline.`,
       vscode.DiagnosticSeverity.Information
     ));
   }
@@ -326,23 +359,54 @@ function checkLimits(doc: vscode.TextDocument, charCount: number): vscode.Diagno
   return diags;
 }
 
+// ─── Arrange (canonical key order) ───────────────────────────────────────────
+
+function arrangePolicy(policy: IAMPolicy): IAMPolicy {
+  const out: IAMPolicy = {};
+  for (const key of POLICY_KEY_ORDER) {
+    if (key in policy) {
+      out[key] = key === 'Statement' && Array.isArray(policy.Statement)
+        ? (policy.Statement as IAMStatement[]).map(arrangeStatement)
+        : policy[key];
+    }
+  }
+  for (const key of Object.keys(policy)) {
+    if (!(key in out)) out[key] = policy[key];
+  }
+  return out;
+}
+
+function arrangeStatement(stmt: IAMStatement): IAMStatement {
+  const out: IAMStatement = {};
+  for (const key of STATEMENT_KEY_ORDER) {
+    if (key in stmt) out[key] = stmt[key];
+  }
+  for (const key of Object.keys(stmt)) {
+    if (!(key in out)) out[key] = stmt[key];
+  }
+  return out;
+}
+
+// ─── IAM detection ────────────────────────────────────────────────────────────
+
+function isIAMPolicy(obj: unknown): boolean {
+  if (typeof obj !== 'object' || obj === null || Array.isArray(obj)) return false;
+  const o = obj as Record<string, unknown>;
+  return (
+    o.Statement !== undefined ||
+    (typeof o.Version === 'string' && VALID_VERSIONS.includes(o.Version))
+  );
+}
+
 // ─── Status bar ───────────────────────────────────────────────────────────────
 
-function refreshStatusBar(
-  doc: vscode.TextDocument,
-  diagnostics?: readonly vscode.Diagnostic[],
-  charCount?: number
-) {
-  // Only show for the active editor
+function refreshStatusBar(doc: vscode.TextDocument, diagnostics?: readonly vscode.Diagnostic[], charCount?: number) {
   if (vscode.window.activeTextEditor?.document.uri.toString() !== doc.uri.toString()) return;
 
   const diags = diagnostics ?? diagnosticCollection.get(doc.uri) ?? [];
-  const chars = charCount ?? -2; // -2 = not an IAM policy
+  const chars = charCount ?? -2;
 
-  if (chars === -2) {
-    statusBarItem.hide();
-    return;
-  }
+  if (chars === -2) { statusBarItem.hide(); return; }
 
   const { managedLimit } = getConfig();
   const errors = diags.filter(d => d.severity === vscode.DiagnosticSeverity.Error).length;
@@ -352,24 +416,19 @@ function refreshStatusBar(
   let bg: vscode.ThemeColor | undefined;
 
   if (chars === -1) {
-    icon = '$(error)';
-    bg = new vscode.ThemeColor('statusBarItem.errorBackground');
-    statusBarItem.text = `${icon} IAM: Invalid JSON`;
-    statusBarItem.tooltip = 'AWS IAM Policy: File contains invalid JSON. Click to re-validate.';
-    statusBarItem.backgroundColor = bg;
+    statusBarItem.text = '$(error) IAM: Invalid JSON';
+    statusBarItem.tooltip = 'AWS IAM Policy: File contains invalid JSON. Click to validate.';
+    statusBarItem.backgroundColor = new vscode.ThemeColor('statusBarItem.errorBackground');
     statusBarItem.show();
     return;
   }
 
   if (errors > 0) {
-    icon = '$(error)';
-    bg = new vscode.ThemeColor('statusBarItem.errorBackground');
+    icon = '$(error)'; bg = new vscode.ThemeColor('statusBarItem.errorBackground');
   } else if (warnings > 0) {
-    icon = '$(warning)';
-    bg = new vscode.ThemeColor('statusBarItem.warningBackground');
+    icon = '$(warning)'; bg = new vscode.ThemeColor('statusBarItem.warningBackground');
   } else {
-    icon = '$(pass-filled)';
-    bg = undefined;
+    icon = '$(pass-filled)'; bg = undefined;
   }
 
   const percent = pct(chars, managedLimit);
@@ -377,15 +436,13 @@ function refreshStatusBar(
   statusBarItem.backgroundColor = bg;
   statusBarItem.tooltip = [
     'AWS IAM Policy Validator',
-    `─────────────────────────`,
-    `Minified size : ${fmt(chars)} chars`,
-    `Managed limit : ${fmt(managedLimit)} chars  (${percent}% used)`,
+    '─────────────────────────',
+    `Size          : ${fmt(chars)} / ${fmt(managedLimit)} chars (${percent}%)`,
     `Inline limit  : ${fmt(getConfig().inlineLimit)} chars`,
-    ``,
-    `Errors   : ${errors}`,
-    `Warnings : ${warnings}`,
-    ``,
-    `Click to validate & see summary`,
+    `Errors        : ${errors}`,
+    `Warnings      : ${warnings}`,
+    '',
+    'Click to validate',
   ].join('\n');
   statusBarItem.show();
 }
@@ -398,7 +455,6 @@ function makeDiag(range: vscode.Range, message: string, severity: vscode.Diagnos
   return d;
 }
 
-/** Find the range covering the JSON key string (e.g. "Version") in the document. */
 function findKeyRange(doc: vscode.TextDocument, key: string, startOffset = 0): vscode.Range {
   const text = doc.getText();
   const needle = `"${key}"`;
@@ -407,7 +463,6 @@ function findKeyRange(doc: vscode.TextDocument, key: string, startOffset = 0): v
   return new vscode.Range(doc.positionAt(idx), doc.positionAt(idx + needle.length));
 }
 
-/** Convert a JSON SyntaxError to a document range. */
 function jsonErrorRange(doc: vscode.TextDocument, err: SyntaxError): vscode.Range {
   const match = err.message.match(/position (\d+)/);
   if (match) {
@@ -417,10 +472,5 @@ function jsonErrorRange(doc: vscode.TextDocument, err: SyntaxError): vscode.Rang
   return new vscode.Range(0, 0, 0, 1);
 }
 
-function fmt(n: number): string {
-  return n.toLocaleString();
-}
-
-function pct(value: number, max: number): number {
-  return Math.round((value / max) * 100);
-}
+function fmt(n: number): string { return n.toLocaleString(); }
+function pct(value: number, max: number): number { return Math.round((value / max) * 100); }

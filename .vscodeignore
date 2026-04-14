@@ -1,5 +1,7 @@
 .vscode/**
 .github/**
+.claude/**
+.DS_Store
 src/**
 node_modules/**
 tsconfig.json
